@@ -1,0 +1,8 @@
+# For Windows: Use CPU-only PyTorch to avoid DLL errors
+# Install with: pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cpu
+
+torch==2.0.1
+torchvision==0.15.2
+opencv-python>=4.5.0
+PyQt5>=5.15.0
+numpy>=1.21.0
