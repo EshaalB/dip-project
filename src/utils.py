@@ -89,9 +89,9 @@ def verify_dataset(data_dir="data"):
         try:
             img = load_image(img_path)
             L, a, b = rgb_to_lab(img)
-            print(f"  ✓ {os.path.basename(img_path)}: {img.shape}")
+            print(f"  [OK] {os.path.basename(img_path)}: {img.shape}")
         except Exception as e:
-            print(f"  ✗ {os.path.basename(img_path)}: Error - {e}")
+            print(f"  [ERROR] {os.path.basename(img_path)}: Error - {e}")
             return False
 
     print("Dataset verification passed!")

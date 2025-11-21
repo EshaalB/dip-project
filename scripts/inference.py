@@ -18,10 +18,53 @@ def load_model(model_path, device="cpu"):
         model = ColorizationModel()
         checkpoint = torch.load(model_path, map_location=device)
 
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
+        # Support multiple checkpoint formats saved by different scripts/tools.
+        # Common formats:
+        # 1) raw state_dict (saved with torch.save(model.state_dict(), path))
+        # 2) dict with key 'model_state_dict' or 'model_state' or 'state_dict'
+        # 3) dict wrapping many fields (epoch, optimizer_state, loss, ...)
+
+        state_dict = None
+        if isinstance(checkpoint, dict):
+            for key in ('model_state_dict', 'model_state', 'state_dict', 'model'):
+                if key in checkpoint:
+                    state_dict = checkpoint[key]
+                    break
+
+            # If no known key was found, assume the checkpoint might already be a state_dict
+            if state_dict is None:
+                # Heuristic: if all values are tensors, treat checkpoint as state_dict
+                if all(hasattr(v, 'size') or isinstance(v, torch.Tensor) for v in checkpoint.values()):
+                    state_dict = checkpoint
+                else:
+                    raise ValueError(f"Unrecognized checkpoint format with keys: {list(checkpoint.keys())}")
         else:
-            model.load_state_dict(checkpoint)
+            # checkpoint is likely a raw state_dict
+            state_dict = checkpoint
+
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            # Attempt to remap older/newer checkpoint key names to current model keys.
+            key_map = {
+                'attention_upsample': 'upsample_attention',
+                'bias_head.feature_adapt': 'bias_head.adapt_features',
+                'bias_head.bias_decoder': 'bias_head.decode',
+                'fusion.fusion_conv': 'fusion.network',
+            }
+
+            remapped = {}
+            for k, v in state_dict.items():
+                new_k = k
+                for old, new in key_map.items():
+                    if old in new_k:
+                        new_k = new_k.replace(old, new)
+                remapped[new_k] = v
+
+            try:
+                model.load_state_dict(remapped, strict=False)
+            except Exception:
+                raise e
 
         model = model.to(device)
         model.eval()
