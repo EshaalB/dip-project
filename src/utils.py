@@ -40,7 +40,7 @@ def lab_to_rgb(L, a, b):
     b_uint8 = np.clip(b_shifted, 0, 255).astype(np.uint8)
 
     lab = np.stack([L_uint8, a_uint8, b_uint8], axis=2)
-    
+
     # Convert LAB to BGR, then BGR to RGB
     # OpenCV cvtColor works with uint8 and handles the conversion precisely
     bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)

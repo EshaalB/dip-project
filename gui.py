@@ -33,20 +33,22 @@ class InferenceThread(QThread):
     finished = pyqtSignal(np.ndarray)
     error = pyqtSignal(str)
 
-    def __init__(self, L, model, device, bias_strength, use_color_balance):
+    def __init__(self, L, model, device, bias_strength, use_color_balance, temperature):
         super().__init__()
         self.L = L
         self.model = model
         self.device = device
         self.bias_strength = bias_strength
         self.use_color_balance = use_color_balance
+        self.temperature = temperature
 
     def run(self):
         try:
             rgb_output = colorize_image(
                 self.L, self.model, self.device,
                 bias_strength=self.bias_strength,
-                use_color_balance=self.use_color_balance
+                use_color_balance=self.use_color_balance,
+                temperature=self.temperature
             )
             self.finished.emit(rgb_output)
         except Exception as e:
@@ -161,6 +163,22 @@ class ColorizationGUI(QMainWindow):
         self.checkbox_color_balance.stateChanged.connect(self.on_controls_changed)
         controls_layout.addWidget(self.checkbox_color_balance)
 
+        # Temperature slider (original feature)
+        temp_layout = QHBoxLayout()
+        temp_label = QLabel("Color Temperature:")
+        self.slider_temperature = QSlider(Qt.Horizontal)
+        self.slider_temperature.setMinimum(-100)
+        self.slider_temperature.setMaximum(100)
+        self.slider_temperature.setValue(0)
+        self.slider_temperature.valueChanged.connect(self.on_controls_changed)
+        self.label_temp_value = QLabel("0.00 (neutral)")
+        self.label_temp_value.setMinimumWidth(100)
+
+        temp_layout.addWidget(temp_label)
+        temp_layout.addWidget(self.slider_temperature)
+        temp_layout.addWidget(self.label_temp_value)
+        controls_layout.addLayout(temp_layout)
+
         # Status
         self.label_status = QLabel("Ready. Load an image and model to start.")
         controls_layout.addWidget(self.label_status)
@@ -206,7 +224,7 @@ class ColorizationGUI(QMainWindow):
 
     def load_model(self, model_path):
         try:
-            self.model = load_model(model_path, str(self.device))
+            self.model = load_model(model_path, self.device)
             self.label_status.setText(f"Model loaded: {os.path.basename(model_path)} (Device: {self.device})")
             if self.current_L is not None:
                 self.btn_run.setEnabled(True)
@@ -216,6 +234,10 @@ class ColorizationGUI(QMainWindow):
     def on_controls_changed(self):
         bias_value = self.slider_bias.value() / 100.0
         self.label_bias_value.setText(f"{bias_value:.2f}")
+
+        temp_value = self.slider_temperature.value() / 100.0
+        temp_text = "neutral" if temp_value == 0 else ("warmer" if temp_value > 0 else "cooler")
+        self.label_temp_value.setText(f"{temp_value:.2f} ({temp_text})")
 
         if self.current_output is not None and self.model is not None and self.current_L is not None:
             self.run_colorization()
@@ -236,10 +258,11 @@ class ColorizationGUI(QMainWindow):
 
         bias_strength = self.slider_bias.value() / 100.0
         use_color_balance = self.checkbox_color_balance.isChecked()
+        temperature = self.slider_temperature.value() / 100.0
 
         self.inference_thread = InferenceThread(
-            self.current_L, self.model, str(self.device),
-            bias_strength, use_color_balance
+            self.current_L, self.model, self.device,
+            bias_strength, use_color_balance, temperature
         )
         self.inference_thread.finished.connect(self.on_inference_finished)
         self.inference_thread.error.connect(self.on_inference_error)

@@ -4,48 +4,41 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
+dist/
+build/
 *.egg
 
-# Model checkpoints
-models/*.pth
-models/*.pt
-!models/.gitkeep
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
 
-# Output images
-*.jpg
-*.jpeg
-*.png
-*.bmp
-!data/*.jpg
-!data/*.jpeg
-!data/*.png
-!data/*.bmp
-
-# IDE
+# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
+
+# Project specific
+models/*.pth
+output/
+*.log
+
+# Data folders (uncomment if you don't want to track data)
+ data/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
 # OS
-.DS_Store
 Thumbs.db
-
