@@ -87,158 +87,115 @@ def load_model(model_path, device="cpu"):
     except Exception as e:
         raise ValueError(f"Failed to load model from {model_path}: {str(e)}")
 
+import numpy as np
+import torch
+from scipy.ndimage import gaussian_filter
 
 def colorize_image(L, model, device="cpu", bias_strength=1.0, use_color_balance=True):
     """
     ORIGINAL CONTRIBUTION: Adaptive Multi-Scale Color Enhancement
-
-    Unique approach combining:
-    1. Dual-path processing (coarse + fine colors)
-    2. Luminance-weighted saturation
-    3. Anisotropic color stretching (a and b treated independently)
-    4. Attention-guided local enhancement
+    
+    1. Dual-path processing (model internally)
+    2. Luminance-weighted saturation (Step 4)
+    3. Anisotropic color stretching (Step 3)
+    4. Attention-guided local enhancement (Step 5)
     """
+    # Normalize luminance to [0,1]
     L_norm = L / 100.0
     L_tensor = torch.from_numpy(L_norm).unsqueeze(0).unsqueeze(0).float().to(device)
 
     with torch.no_grad():
-        # Model returns: ab_corrected (already fused), bias_map, attention
+        # Model outputs predicted ab, bias_map, and attention map
         ab_corrected, bias_map, attention = model(L_tensor)
 
-    # Convert to numpy
     ab_corrected_np = ab_corrected[0].cpu().numpy().transpose(1, 2, 0)
     attention_np = attention[0, 0].cpu().numpy()
 
-    # Step 1: Denormalize from [-1, 1] to [-127, 127]
+    # Denormalize ab from [-1, 1] to [-127, 127]
     a_pred = ab_corrected_np[:, :, 0] * 127.0
     b_pred = ab_corrected_np[:, :, 1] * 127.0
 
-    # Step 2: Apply bias map with controlled strength
+    # Step 2: Apply bias map scaled by bias_strength (for subtle control)
     if bias_strength != 1.0:
         bias_map_np = bias_map[0].cpu().numpy().transpose(1, 2, 0)
         bias_a = bias_map_np[:, :, 0] * 10.0 * (bias_strength - 1.0)
         bias_b = bias_map_np[:, :, 1] * 10.0 * (bias_strength - 1.0)
-        a_pred = a_pred + bias_a
-        b_pred = b_pred + bias_b
+        a_pred += bias_a
+        b_pred += bias_b
 
-    # Step 3: UNIQUE - Anisotropic Adaptive Stretching
-    # Treat a and b channels independently based on their distributions
-
-    # Get robust statistics for each channel separately
-    a_p5, a_p95 = np.percentile(a_pred, [5, 95])
-    b_p5, b_p95 = np.percentile(b_pred, [5, 95])
-
-    a_span = a_p95 - a_p5
-    b_span = b_p95 - b_p5
-
-    # Minimum desired span (avoid over-compression)
-    min_span = 20.0
-    max_span = 80.0  # Maximum to prevent oversaturation
-
-    # Adaptive stretching - expand if too compressed, compress if too spread
-    def adaptive_stretch(channel, p5, p95, current_span):
+    # Step 3: Anisotropic Adaptive Stretching per channel for natural color distribution
+    def adaptive_stretch(channel):
+        p5, p95 = np.percentile(channel, [5, 95])
+        span = p95 - p5
         center = (p5 + p95) / 2.0
-        if current_span < min_span and current_span > 0:
-            # Expand narrow range
-            factor = min_span / current_span
-        elif current_span > max_span:
-            # Compress wide range
-            factor = max_span / current_span
+        min_span, max_span = 20.0, 80.0
+        if span < min_span and span > 0:
+            factor = min_span / span
+        elif span > max_span:
+            factor = max_span / span
         else:
             factor = 1.0
         return (channel - center) * factor + center
 
-    a_stretched = adaptive_stretch(a_pred, a_p5, a_p95, a_span)
-    b_stretched = adaptive_stretch(b_pred, b_p5, b_p95, b_span)
+    a_stretched = adaptive_stretch(a_pred)
+    b_stretched = adaptive_stretch(b_pred)
 
-    # Step 4: UNIQUE - Luminance-Weighted Saturation Modulation
-    # Different luminance levels have different natural saturation
-    L_normalized = L / 100.0
+    # Step 4: Luminance-weighted saturation modulation - natural saturation varies with lightness
+    saturation_curve = 1.0 - 0.4 * (4.0 * ((L_norm - 0.5) ** 2))  # parabola centered at midtones
+    saturation_curve = np.clip(saturation_curve, 0.6, 1.2)  # saturation varies smoothly between 0.6 and 1.2
 
-    # Create smooth saturation curve: peak at mid-tones, reduced at extremes
-    # This matches natural image statistics
-    saturation_curve = 1.0 - 0.4 * ((L_normalized - 0.5) ** 2) * 4.0
-    saturation_curve = np.clip(saturation_curve, 0.6, 1.2)
-
-    # Apply saturation modulation
     a_modulated = a_stretched * saturation_curve
     b_modulated = b_stretched * saturation_curve
 
-    # Step 5: UNIQUE - Attention-Guided Local Enhancement
-    # Boost colors where the model pays attention (regions it's confident about)
-
-    # Normalize attention to reasonable range
+    # Step 5: Attention-guided local enhancement - boost colors where model is confident
     attention_normalized = (attention_np - attention_np.min()) / (attention_np.max() - attention_np.min() + 1e-8)
-
-    # Apply gentle boost in attended regions (10-20% boost)
-    attention_multiplier = 1.0 + attention_normalized * 0.15
+    attention_multiplier = 1.0 + attention_normalized * 0.15  # max ~15% boost
 
     a_attended = a_modulated * attention_multiplier
     b_attended = b_modulated * attention_multiplier
 
-    # Step 6: UNIQUE - Bilateral-Style Smoothing (preserve edges)
-    # Only if image has noise (based on variance)
-
-    a_variance = np.var(a_attended)
-    b_variance = np.var(b_attended)
-
-    # Only smooth if there's significant noise
-    if a_variance > 100 or b_variance > 100:
-        # Very light smoothing
+    # Step 6: Bilateral-style smoothing to preserve edges and reduce noise if present
+    a_var, b_var = np.var(a_attended), np.var(b_attended)
+    if a_var > 100 or b_var > 100:
         a_smooth = gaussian_filter(a_attended, sigma=0.8)
         b_smooth = gaussian_filter(b_attended, sigma=0.8)
-
-        # Detect edges in luminance
         L_edges = gaussian_filter(L, sigma=1.0)
         edge_map = np.abs(L - L_edges)
         edge_weight = np.clip(edge_map / 15.0, 0, 1)
-
-        # Blend: original at edges, smoothed in flat regions
         a_final_smooth = a_attended * edge_weight + a_smooth * (1 - edge_weight)
         b_final_smooth = b_attended * edge_weight + b_smooth * (1 - edge_weight)
     else:
         a_final_smooth = a_attended
         b_final_smooth = b_attended
 
-    # Step 7: Color Balance Correction
+    # Step 7: Color balance correction to remove global color cast, retain warmth/coolness
     if use_color_balance:
-        # Remove global color cast
-        a_mean = np.mean(a_final_smooth)
-        b_mean = np.mean(b_final_smooth)
-
-        # Apply correction (80% strength to preserve some warmth/coolness)
+        a_mean, b_mean = np.mean(a_final_smooth), np.mean(b_final_smooth)
         a_balanced = a_final_smooth - a_mean * 0.8
         b_balanced = b_final_smooth - b_mean * 0.8
     else:
-        a_balanced = a_final_smooth
-        b_balanced = b_final_smooth
+        a_balanced, b_balanced = a_final_smooth, b_final_smooth
 
-    # Step 8: UNIQUE - Color Diversity Enhancement
-    # Ensure we don't lose color variety by enforcing minimum color variance
+    # Step 8: Color diversity enhancement - enforce minimum variance for vivid colors
+    def enhance_variance(channel):
+        var = np.var(channel)
+        min_var = 100.0
+        if var < min_var and var > 0:
+            center = np.mean(channel)
+            boost = min(np.sqrt(min_var / var), 1.5)
+            return (channel - center) * boost + center
+        return channel
 
-    a_final_var = np.var(a_balanced)
-    b_final_var = np.var(b_balanced)
+    a_final = enhance_variance(a_balanced)
+    b_final = enhance_variance(b_balanced)
 
-    # If variance is too low, boost contrast slightly
-    min_variance = 100.0
+    # Step 9: Clip to valid LAB range and convert to RGB
+    a_final = np.clip(a_final, -127, 127)
+    b_final = np.clip(b_final, -127, 127)
 
-    if a_final_var < min_variance and a_final_var > 0:
-        a_center = np.mean(a_balanced)
-        boost = np.sqrt(min_variance / a_final_var)
-        a_balanced = (a_balanced - a_center) * min(boost, 1.5) + a_center
-
-    if b_final_var < min_variance and b_final_var > 0:
-        b_center = np.mean(b_balanced)
-        boost = np.sqrt(min_variance / b_final_var)
-        b_balanced = (b_balanced - b_center) * min(boost, 1.5) + b_center
-
-    # Step 9: Final clipping to valid LAB range
-    a_final = np.clip(a_balanced, -127, 127)
-    b_final = np.clip(b_balanced, -127, 127)
-
-    # Convert to RGB
-    rgb_output = lab_to_rgb(L, a_final, b_final)
+    rgb_output = lab_to_rgb(L, a_final, b_final)    
     return rgb_output
+
 
 
 def colorize_from_grayscale(grayscale_path, model_path, output_path=None,

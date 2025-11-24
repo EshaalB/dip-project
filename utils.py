@@ -21,16 +21,26 @@ def rgb_to_lab(rgb_image):
 
 def lab_to_rgb(L, a, b):
     # Convert Lab to RGB color space with proper range handling
-    L_clipped = np.clip(L, 0, 100)
-    a_clipped = np.clip(a, -127, 127)
-    b_clipped = np.clip(b, -127, 127)
+    # Keep as float32 throughout to preserve precision until final conversion
+    L_clipped = np.clip(L, 0, 100).astype(np.float32)
+    a_clipped = np.clip(a, -127, 127).astype(np.float32)
+    b_clipped = np.clip(b, -127, 127).astype(np.float32)
 
-    # Convert to uint8 range [0, 255]
-    a_shifted = (a_clipped + 128.0).astype(np.uint8)
-    b_shifted = (b_clipped + 128.0).astype(np.uint8)
-    L_uint8 = L_clipped.astype(np.uint8)
+    # Shift a and b to [0, 255] range for OpenCV LAB format
+    # OpenCV LAB: L in [0, 100], a/b in [0, 255] (representing -127 to 127)
+    a_shifted = a_clipped + 128.0
+    b_shifted = b_clipped + 128.0
 
-    lab = np.stack([L_uint8, a_shifted, b_shifted], axis=2)
+    # Stack LAB channels - convert to uint8 only for OpenCV cvtColor
+    # This preserves precision better than converting earlier
+    L_uint8 = np.clip(L_clipped, 0, 100).astype(np.uint8)
+    a_uint8 = np.clip(a_shifted, 0, 255).astype(np.uint8)
+    b_uint8 = np.clip(b_shifted, 0, 255).astype(np.uint8)
+
+    lab = np.stack([L_uint8, a_uint8, b_uint8], axis=2)
+    
+    # Convert LAB to BGR, then BGR to RGB
+    # OpenCV cvtColor works with uint8 and handles the conversion precisely
     bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
