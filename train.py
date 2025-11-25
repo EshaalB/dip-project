@@ -137,9 +137,10 @@ def train_model(model, data_loader, epochs=100, device="cpu", save_folder="model
     feature_extractor = TinyVGG().to(device)
     feature_extractor.eval()
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0002, betas=(0.5, 0.999))
+    # Reduced learning rate for more stable training
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, betas=(0.5, 0.999))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-6
+        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
     )
 
     os.makedirs(save_folder, exist_ok=True)
@@ -251,21 +252,21 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using: {device}")
 
-    # Create dataset and loader (larger batch for faster training)
+    # Create dataset and loader with reduced RAM footprint
     dataset = ImageDataset("data", img_size=(224, 224))
-    batch_size = 64 if len(dataset) >= 4 else 2
-    num_workers = min(16, os.cpu_count())
+    batch_size = 8  # Reduced for lower RAM usage
+    num_workers = 0  # No multiprocessing to save RAM
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
     # Create model
     model = ColorizationModel().to(device)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model has {param_count:,} parameters")
-    print(f"Batch size: {batch_size} (for faster training)\n")
+    print(f"Batch size: {batch_size} (optimized for low RAM usage)\n")
 
     # Train (100 epochs for real results)
     # This will take longer (maybe 20-30 mins on CPU) but is necessary for quality
-    train_model(model, loader, epochs=15, device=device, save_folder="models", save_every=1  )
+    train_model(model, loader, epochs=30, device=device, save_folder="models", save_every=1  )
     print("\nDone!")
 
 
