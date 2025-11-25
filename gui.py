@@ -198,7 +198,7 @@ class ColorizationGUI(QMainWindow):
             return
 
         try:
-            img = load_image(file_path, target_size=(256, 256))
+            img = load_image(file_path, target_size=(224, 224))
             self.current_image = img
             L, _, _ = rgb_to_lab(img)
             self.current_L = L

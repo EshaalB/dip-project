@@ -1,109 +1,118 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import timm
 
-class Attention(nn.Module):
-    """Spatial attention mechanism"""
-    def __init__(self, channels):
-        super().__init__()
-        self.conv = nn.Conv2d(channels, 1, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        return self.sigmoid(self.conv(x))
-
-class BiasHead(nn.Module):
-    """Correction map generator"""
-    def __init__(self, feature_size=128):
-        super().__init__()
-        self.adapt = nn.Sequential(
-            nn.Conv2d(feature_size, 64, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(64),
-        )
-        # Using upsample+conv instead of transposed conv to avoid checkerboard artifacts
-        self.decode = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(64, 32, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(32),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(32, 16, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(16),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(16, 2, 3, padding=1),
-            nn.Tanh()
-        )
-
-    def forward(self, features):
-        x = self.adapt(features)
-        return self.decode(x)
-
-class Fusion(nn.Module):
-    """Fuses main prediction with correction map"""
+# -----------------------------
+# DINOv2 Encoder (semantic)
+# -----------------------------
+class DinoEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(4, 16, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 2, 1),
+        # Pretrained semantic vision model
+        self.model = timm.create_model(
+            "vit_small_patch16_224",
+            pretrained=True,
+            num_classes=0
+        )
+        # convert grayscale to 3-channel input for ViT
+        self.gray_to_rgb = nn.Conv2d(1, 3, kernel_size=1)
+
+    def forward(self, x):
+        x = self.gray_to_rgb(x)
+        features = self.model.forward_features(x)
+        
+        # Check if output is dict (DINOv2) or Tensor (Standard ViT)
+        if isinstance(features, dict):
+            tokens = features["x_norm_patchtokens"]
+        else:
+            # Standard ViT returns (B, N_patches+1, C)
+            # Remove CLS token (index 0)
+            tokens = features[:, 1:, :]
+            # Permute to (B, C, N)
+            tokens = tokens.transpose(1, 2)
+            
+        B, C, N = tokens.shape
+        H = W = int(N ** 0.5)
+        return tokens.view(B, C, H, W)  # reshape into spatial map
+
+
+
+# -----------------------------
+# Simple Semantic Decoder (Modified)
+# -----------------------------
+# -----------------------------
+# Simple Semantic Decoder (Modified)
+# -----------------------------
+class ColorDecoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+        def upsample_block(in_c, out_c):
+            return nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True)
+            )
+
+        self.decode = nn.Sequential(
+            upsample_block(384, 256),
+            upsample_block(256, 128),
+            upsample_block(128, 64),
+            upsample_block(64, 32)
         )
 
-    def forward(self, prediction, correction, attention):
-        # Weight correction by attention
-        weighted_corr = correction * attention
-        combined = torch.cat([prediction, weighted_corr], dim=1)
-        return self.conv(combined)
+    def forward(self, x):
+        return self.decode(x)
 
 
+# -----------------------------
+# Final Colorization Model
+# -----------------------------
 class ColorizationModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # Encoder - downsamples to extract features
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 32, 3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(32),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(64),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(128),
-        )
-
-        # Decoder - predicts initial colors
-        self.decoder = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(128, 64, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(64),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(64, 32, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(32),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(32, 2, 3, padding=1),
+        self.encoder = DinoEncoder()
+        self.decoder = ColorDecoder()
+        
+        # Heads attached to the decoder output (32 channels)
+        
+        # 1. Base Color Prediction
+        self.base_head = nn.Sequential(
+            nn.Conv2d(32, 2, kernel_size=3, padding=1),
             nn.Tanh()
         )
-
-        self.bias_head = BiasHead(feature_size=128)
-        self.attention = Attention(channels=128)
-        self.fusion = Fusion()
-
-        # Upsample attention to match output resolution
-        self.upsample_attn = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=False)
+        
+        # 2. Bias/Correction Map
+        self.bias_head = nn.Sequential(
+            nn.Conv2d(32, 2, kernel_size=3, padding=1),
+            nn.Tanh()
+        )
+        
+        # 3. Attention Map
+        self.attention_head = nn.Sequential(
+            nn.Conv2d(32, 1, kernel_size=3, padding=1),
+            nn.Sigmoid()
+        )
 
     def forward(self, grayscale):
-        # print(f"[DEBUG] Input shape: {grayscale.shape}")
-
+        # 1. Encode
         features = self.encoder(grayscale)
-        color_pred = self.decoder(features)
-        correction = self.bias_head(features)
-        attention = self.attention(features)
-        attention_full = self.upsample_attn(attention)
-
-        # Fuse prediction with correction
-        final = self.fusion(color_pred, correction, attention_full)
-
-        return final, correction, attention_full
+        
+        # 2. Decode to high-res features
+        dec_features = self.decoder(features)
+        
+        # 3. Generate components
+        # Outputs are in [-1, 1] range
+        base_ab = self.base_head(dec_features)
+        bias_map = self.bias_head(dec_features)
+        attention = self.attention_head(dec_features)
+        
+        # 4. Learned Fusion: Base + (Bias * Attention)
+        # Attention gates the correction
+        final_ab = base_ab + (bias_map * attention)
+        
+        # Clamp to valid range
+        final_ab = torch.clamp(final_ab, -1.0, 1.0)
+        
+        return final_ab, bias_map, attention

@@ -15,8 +15,8 @@ def rgb_to_lab(rgb_image):
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
 
     L = lab[:, :, 0].astype(np.float32)
-    a = lab[:, :, 1].astype(np.float32) - 128.0
-    b = lab[:, :, 2].astype(np.float32) - 128.0
+    a = lab[:, :, 1].astype(np.float32)
+    b = lab[:, :, 2].astype(np.float32)
 
     return L, a, b
 
@@ -35,7 +35,8 @@ def lab_to_rgb(L, a, b):
 
     # Stack LAB channels - convert to uint8 only for OpenCV cvtColor
     # This preserves precision better than converting earlier
-    L_uint8 = np.clip(L_clipped, 0, 100).astype(np.uint8)
+    # OpenCV expects L to be in 0-255 range for 8-bit images, so we scale 0-100 -> 0-255
+    L_uint8 = np.clip(L_clipped * 2.55, 0, 255).astype(np.uint8)
     a_uint8 = np.clip(a_shifted, 0, 255).astype(np.uint8)
     b_uint8 = np.clip(b_shifted, 0, 255).astype(np.uint8)
 
@@ -55,7 +56,9 @@ def lab_to_rgb_tensor(ab, L):
     a = ab[:, 0:1, :, :] * 127.0
     b = ab[:, 1:1+1, :, :] * 127.0
 
-    lab = torch.cat([L_scaled, a + 128.0, b + 128.0], dim=1)
+    # Kornia expects standard Lab: L [0, 100], a [-128, 127], b [-128, 127]
+    # No need to add 128.0
+    lab = torch.cat([L_scaled, a, b], dim=1)
 
     # Convert using OpenCV-like transformation via kornia
     import kornia
