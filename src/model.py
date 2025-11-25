@@ -41,9 +41,6 @@ class DinoEncoder(nn.Module):
 # -----------------------------
 # Simple Semantic Decoder (Modified)
 # -----------------------------
-# -----------------------------
-# Simple Semantic Decoder (Modified)
-# -----------------------------
 class ColorDecoder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -51,7 +48,7 @@ class ColorDecoder(nn.Module):
         def upsample_block(in_c, out_c):
             return nn.Sequential(
                 nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, padding_mode='reflect'),
                 nn.ReLU(inplace=True)
             )
 
@@ -79,19 +76,19 @@ class ColorizationModel(nn.Module):
         
         # 1. Base Color Prediction
         self.base_head = nn.Sequential(
-            nn.Conv2d(32, 2, kernel_size=3, padding=1),
+            nn.Conv2d(32, 2, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.Tanh()
         )
         
         # 2. Bias/Correction Map
         self.bias_head = nn.Sequential(
-            nn.Conv2d(32, 2, kernel_size=3, padding=1),
+            nn.Conv2d(32, 2, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.Tanh()
         )
         
         # 3. Attention Map
         self.attention_head = nn.Sequential(
-            nn.Conv2d(32, 1, kernel_size=3, padding=1),
+            nn.Conv2d(32, 1, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.Sigmoid()
         )
 
@@ -103,7 +100,7 @@ class ColorizationModel(nn.Module):
         dec_features = self.decoder(features)
         
         # 3. Generate components
-        # Outputs are in [-1, 1] range
+        # Outputs are in [-1, 1] range from tanh
         base_ab = self.base_head(dec_features)
         bias_map = self.bias_head(dec_features)
         attention = self.attention_head(dec_features)
@@ -112,7 +109,12 @@ class ColorizationModel(nn.Module):
         # Attention gates the correction
         final_ab = base_ab + (bias_map * attention)
         
-        # Clamp to valid range
+        # Clamp to valid normalized range [-1, 1]
         final_ab = torch.clamp(final_ab, -1.0, 1.0)
+        
+        # 5. Scale to LAB color range [-110, 110]
+        # This ensures the model outputs in the expected LAB units
+        final_ab = final_ab * 110.0
+        bias_map = bias_map * 110.0
         
         return final_ab, bias_map, attention
