@@ -124,7 +124,7 @@ def colorize_image(L, model, device="cpu", bias_strength=1.0, use_color_balance=
 def colorize_from_grayscale(grayscale_path, model_path, output_path=None, device="cpu"):
     """Full pipeline - load, colorize, save"""
     model = load_model(model_path, device)
-    img = load_image(grayscale_path, target_size=(256, 256))
+    img = load_image(grayscale_path, target_size=(224, 224))
 
     # Extract L channel from image
     if len(img.shape) == 3:

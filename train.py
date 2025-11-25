@@ -1,263 +1,272 @@
+# Training script - Enhanced with perceptual and multi-scale losses
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torchvision import models
 from torchvision.models import VGG16_Weights
 import os
 import sys
 
+# Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.model import ColorizationModel
 from src.dataset import ImageDataset
+from src.utils import verify_dataset as check_dataset
 from src.utils import lab_to_rgb_tensor
 
-class PerceptualFeatureExtractor(nn.Module):
-    """VGG16-based feature extractor for perceptual loss"""
-    def __init__(self):
+# ---------------------------
+# TinyVGG perceptual extractor
+# ---------------------------
+class TinyVGG(nn.Module):
+    """
+    Very small VGG-like feature extractor for perceptual loss.
+    Not pretrained (lightweight). Captures low-mid level features.
+    Returns features at a single layer for L1 perceptual loss.
+    """
+    def __init__(self, in_channels=3, out_layer=3):
         super().__init__()
-        vgg = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
-        self.slice = nn.Sequential()
+        # small stack of convs
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(64),
+            nn.MaxPool2d(2),
 
-        # Using first 16 layers (up to conv3_3)
-        for x in range(16):
-            self.slice.add_module(str(x), vgg[x])
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(128),
+            nn.MaxPool2d(2),
 
-        for param in self.slice.parameters():
-            param.requires_grad = False
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(256),
+            # we stop here (out_layer ~3 gives these mid-level features)
+        )
 
-    def forward(self, rgb):
-        return self.slice(rgb)
+    def forward(self, x):
+        # expects RGB input normalized to [0,1] that we will normalize consistently in train loop
+        return self.features(x)
 
+# ---------------------------
+# Loss function
+# ---------------------------
+def compute_loss(pred_ab, target_ab, attention, perceptual_net, L_source):
+    """
+    Stable loss: pixel + perceptual + attention smooth + L-guided chrominance smooth
+    - pred_ab: (B,2,H,W) predicted ab scaled in real LAB units (we keep model returning [-110,110])
+    - target_ab: (B,2,H,W) ground-truth ab in same scale
+    - attention: (B,1 or 2,H',W') upsampled to (B,2,H,W) in model; if zeros it's fine.
+    - perceptual_net: tiny VGG; expects RGB in [0,1] normalized using ImageNet mean/std
+    - L_source: (B,1,H,W) L normalized [0,1]
+    """
+    device = pred_ab.device
 
-def compute_loss(prediction, target, attention, feature_extractor, L_source):
-    # Pixel loss weighted by attention map
-    pixel_error = F.l1_loss(prediction, target, reduction='none')
-    loss_pixel = (pixel_error * (1.0 + attention)).mean()
+    # 1) Pixel loss (smooth L1 on ab in LAB range)
+    loss_pixel = F.smooth_l1_loss(pred_ab, target_ab)
 
-    # Perceptual loss - compare VGG features
-    pred_rgb = lab_to_rgb_tensor(L_source, prediction)
-    target_rgb = lab_to_rgb_tensor(L_source, target)
-    pred_feat = feature_extractor(pred_rgb)
-    target_feat = feature_extractor(target_rgb)
-    loss_perceptual = F.l1_loss(pred_feat, target_feat)
+    # 2) Perceptual loss: convert lab->rgb via your util (lab_to_rgb_tensor expects L in same scale as used in your utils)
+    # We need to prepare RGB tensors normalized for perceptual network.
+    with torch.no_grad():
+        # create RGB tensors in [0,1] using lab_to_rgb_tensor (it should output 0..1)
+        # Note: src/utils.py defines lab_to_rgb_tensor(ab, L)
+        pred_rgb = lab_to_rgb_tensor(pred_ab, L_source)
+        target_rgb = lab_to_rgb_tensor(target_ab, L_source)
+    
+    # normalize for perceptual extractor (ImageNet-like mean/std)
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1,3,1,1)
+    std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1,3,1,1)
+    pred_in = (pred_rgb - mean) / std
+    targ_in = (target_rgb - mean) / std
 
-    # print(f"[DEBUG] Pixel loss: {loss_pixel.item():.4f}, Perceptual: {loss_perceptual.item():.4f}")
+    feat_pred = perceptual_net(pred_in)
+    feat_targ = perceptual_net(targ_in)
+    loss_perc = F.l1_loss(feat_pred, feat_targ)
 
-    # Chroma constraint - prevent oversaturation
-    # Predictions are in [-1,1], so max magnitude is sqrt(2) ≈ 1.414
-    chroma_mag = torch.sqrt(prediction[:, 0:1]**2 + prediction[:, 1:2]**2)
-    loss_chroma = torch.mean(F.relu(chroma_mag - 1.3))  # Allow up to ~1.3, penalize beyond
+    # 3) Attention smoothness (encourage spatial coherence of attention)
+    # attention may have 1 or 2 channels; compute along spatial dims
+    if attention is None or attention.sum() == 0:
+        loss_att = torch.tensor(0.0, device=device)
+    else:
+        # make sure attention is same size as prediction (upsample if needed)
+        if attention.shape[2:] != pred_ab.shape[2:]:
+            attention_resized = F.interpolate(attention, size=pred_ab.shape[2:], mode='bilinear', align_corners=False)
+        else:
+            attention_resized = attention
+        # L1 on gradient of attention
+        loss_att = torch.mean(torch.abs(attention_resized[:, :, :, 1:] - attention_resized[:, :, :, :-1])) + \
+                   torch.mean(torch.abs(attention_resized[:, :, 1:, :] - attention_resized[:, :, :-1, :]))
+        loss_att = loss_att * 0.01
 
-    # Attention smoothness
-    loss_smooth = (torch.mean(torch.abs(attention[:, :, 1:] - attention[:, :, :-1])) +
-                   torch.mean(torch.abs(attention[:, :, :, 1:] - attention[:, :, :, :-1])))
+    # 4) L-guided chrominance smoothness: encourage similar ab where L is similar
+    L = L_source
+    # horizontal
+    L_dx = L[:, :, :, 1:] - L[:, :, :, :-1]
+    ab_dx = pred_ab[:, :, :, 1:] - pred_ab[:, :, :, :-1]
+    w_x = torch.exp(-torch.abs(L_dx))
+    loss_lx = (w_x * torch.abs(ab_dx)).mean()
+    # vertical
+    L_dy = L[:, :, 1:, :] - L[:, :, :-1, :]
+    ab_dy = pred_ab[:, :, 1:, :] - pred_ab[:, :, :-1, :]
+    w_y = torch.exp(-torch.abs(L_dy))
+    loss_ly = (w_y * torch.abs(ab_dy)).mean()
+    loss_l_smooth = 0.03 * (loss_lx + loss_ly)
 
-    # Gradient preservation for edges
-    grad_h_pred = prediction[:, :, 1:] - prediction[:, :, :-1]
-    grad_h_target = target[:, :, 1:] - target[:, :, :-1]
-    grad_w_pred = prediction[:, :, :, 1:] - prediction[:, :, :, :-1]
-    grad_w_target = target[:, :, :, 1:] - target[:, :, :, :-1]
-    loss_gradient = F.l1_loss(grad_h_pred, grad_h_target) + F.l1_loss(grad_w_pred, grad_w_target)
+    # total
+    total = (1.0 * loss_pixel) + (0.2 * loss_perc) + loss_att + loss_l_smooth
 
-    # Mean color bias correction
-    loss_mean = (F.l1_loss(prediction[:, 0].mean(), target[:, 0].mean()) +
-                 F.l1_loss(prediction[:, 1].mean(), target[:, 1].mean()))
-
-    # Combine losses (tuned weights)
-    total = (0.7 * loss_pixel +
-             0.7 * loss_perceptual +
-             0.1 * loss_chroma +
-             0.05 * loss_smooth +
-             0.1 * loss_gradient +
-             0.5 * loss_mean)
-
-    return total, {
-        'pixel': loss_pixel.item(),
-        'perceptual': loss_perceptual.item(),
-        'chroma': loss_chroma.item(),
-        'smooth': loss_smooth.item(),
-        'gradient': loss_gradient.item(),
-        'mean': loss_mean.item()
+    components = {
+        "pixel": loss_pixel.item(),
+        "perceptual": loss_perc.item(),
+        "attention_smooth": loss_att.item() if isinstance(loss_att, torch.Tensor) else float(loss_att),
+        "l_smooth": loss_l_smooth.item()
     }
+    return total, components
 
-
-def train_model(model, train_loader, val_loader, epochs, device, save_folder="models", save_every=10):
-    os.makedirs(save_folder, exist_ok=True)
-
-    # Setup perceptual loss
-    feature_extractor = PerceptualFeatureExtractor().to(device)
+def train_model(model, data_loader, epochs=100, device="cpu", save_folder="models", save_every=10):
+    """
+    Enhanced training with multi-objective loss:
+    Pixel + Perceptual + Attention Smooth + L-guided Smooth
+    """
+    # Initialize perceptual feature extractor
+    feature_extractor = TinyVGG().to(device)
     feature_extractor.eval()
 
     optimizer = optim.Adam(model.parameters(), lr=0.0002, betas=(0.5, 0.999))
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5,
-                                                      patience=15, min_lr=1e-6)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-6
+    )
 
-    print(f"\nTraining on {device} for {epochs} epochs...")
-    print("-" * 60)
+    os.makedirs(save_folder, exist_ok=True)
 
-    best_val_loss = float('inf')
+    model.train()
+    print(f"\n{'='*60}")
+    print(f"  ENHANCED TRAINING WITH UPDATED LOSS")
+    print(f"{'='*60}")
+    print(f"Epochs: {epochs} | Device: {device}")
+    print(f"Components: Pixel + Perceptual + Attention Smooth + L-guided Smooth")
+    print(f"{'='*60}\n")
+
+    best_loss = float('inf')
+    loss_history = []
 
     for epoch in range(epochs):
-        # Training phase
-        model.train()
-        train_loss = 0.0
-        losses = {'pixel': 0, 'perceptual': 0, 'chroma': 0, 'smooth': 0, 'gradient': 0, 'mean': 0}
-        n_batches = 0
+        total_loss = 0.0
+        loss_components = {k: 0.0 for k in ['pixel', 'perceptual', 'attention_smooth', 'l_smooth']}
+        batch_count = 0
 
-        for grayscale, color_target in train_loader:
+        img_number = 0
+
+        for grayscale, color_target in data_loader:
+            batch_size_actual = grayscale.size(0)
+            for _ in range(batch_size_actual):
+                img_number += 1
+                # print(f"Image loaded: {img_number}")  
+
             grayscale = grayscale.to(device)
             color_target = color_target.to(device)
 
+            # Forward pass
             color_pred, correction_map, attention = model(grayscale)
 
-            # print(f"[DEBUG] Batch {n_batches}: pred range [{color_pred.min():.3f}, {color_pred.max():.3f}]")
+            # Compute loss using updated compute_loss
+            loss, components = compute_loss(
+                pred_ab=color_pred,
+                target_ab=color_target,
+                attention=attention,
+                perceptual_net=feature_extractor,
+                L_source=grayscale
+            )
 
-            loss, components = compute_loss(color_pred, color_target, attention,
-                                           feature_extractor, grayscale)
-
+            # Backprop
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            train_loss += loss.item()
-            for k in losses:
-                losses[k] += components[k]
-            n_batches += 1
+            total_loss += loss.item()
+            for key in loss_components:
+                loss_components[key] += components.get(key, 0.0)
+            batch_count += 1
 
-        avg_train_loss = train_loss / n_batches
-        for k in losses:
-            losses[k] /= n_batches
+        # Average losses
+        avg_loss = total_loss / batch_count if batch_count > 0 else 0.0
+        loss_history.append(avg_loss)
 
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            for grayscale, color_target in val_loader:
-                grayscale = grayscale.to(device)
-                color_target = color_target.to(device)
-                color_pred, _, attention = model(grayscale)
-                loss, _ = compute_loss(color_pred, color_target, attention,
-                                      feature_extractor, grayscale)
-                val_loss += loss.item()
-                val_batches += 1
+        for key in loss_components:
+            loss_components[key] /= batch_count
 
-        avg_val_loss = val_loss / val_batches if val_batches > 0 else float('inf')
+        scheduler.step(avg_loss)
 
-        scheduler.step(avg_val_loss)
+        # Progress output
+        print(f"\nEpoch {epoch+1:3d}/{epochs} | Loss: {avg_loss:.5f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
+        print("  > " + " | ".join([f"{k.capitalize()}: {v:.4f}" for k, v in loss_components.items()]) + "\n")
 
-        # Print progress
-        print(f"Epoch {epoch+1:3d}/{epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
-        print(f"  Pixel: {losses['pixel']:.4f} | Perceptual: {losses['perceptual']:.4f} | Gradient: {losses['gradient']:.4f}")
-
-        # Save best model based on validation loss
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        # Save best model
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_path = os.path.join(save_folder, "colorization_best.pth")
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch + 1,
-                'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss
-            }, os.path.join(save_folder, "colorization_best.pth"))
-            # print(f"[DEBUG] Saved best model at epoch {epoch+1}")
+                'loss': avg_loss,
+                'loss_history': loss_history
+            }, best_path)
 
-        # Periodic checkpoints
+        # Periodic checkpoint
         if (epoch + 1) % save_every == 0:
+            checkpoint_path = os.path.join(save_folder, f"model_epoch_{epoch+1}.pth")
             torch.save({
                 'epoch': epoch + 1,
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss
-            }, os.path.join(save_folder, f"model_epoch_{epoch+1}.pth"))
+                'loss': avg_loss,
+                'loss_history': loss_history
+            }, checkpoint_path)
 
     # Save final model
-    torch.save(model.state_dict(), os.path.join(save_folder, "colorization_final.pth"))
+    final_path = os.path.join(save_folder, "colorization_final.pth")
+    torch.save(model.state_dict(), final_path)
 
-    print("\n" + "="*60)
-    print(f"Training done! Best val loss: {best_val_loss:.4f}")
-    print("="*60)
+    print(f"\n{'='*60}")
+    print(f"Training Complete!")
+    print(f"Best Loss: {best_loss:.5f} | Final Loss: {avg_loss:.5f}")
+    if len(loss_history) > 0:
+        print(f"Improvement: {((loss_history[0] - best_loss) / loss_history[0] * 100):.1f}%")
+    print(f"Best model: {best_path}")
+    print(f"{'='*60}\n")
 
 
 def main():
-    print("\n" + "="*60)
-    print("  Image Colorization Training")
-    print("="*60)
-
-    # Device selection
-    if torch.cuda.is_available():
-        print(f"\nGPU available: {torch.cuda.get_device_name(0)}")
-        choice = input("Use GPU? (y/n, default y): ").strip().lower()
-        device = torch.device("cuda" if choice != 'n' else "cpu")
-    else:
-        print("\nNo GPU detected, using CPU")
-        device = torch.device("cpu")
-        input("Press Enter to continue...")
-
-    print(f"Device: {device}")
-
-    # Load dataset
-    dataset_path = "data"
-    if not os.path.exists(dataset_path):
-        print(f"\nError: '{dataset_path}' folder not found")
-        input("Press Enter to exit...")
+    # Check dataset
+    if not check_dataset("data"):
         return
 
-    # print(f"[DEBUG] Loading images from {dataset_path}")
-    dataset = ImageDataset(dataset_path, img_size=(256, 256), augment=True)
+    # Setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using: {device}")
 
-    if len(dataset) == 0:
-        print(f"\nError: No images found in '{dataset_path}'")
-        input("Press Enter to exit...")
-        return
-
-    # Split into train/val (80/20)
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-
-    print(f"\nDataset split: {train_size} train, {val_size} val")
-
-    # Determine batch size based on dataset size
-    if len(dataset) < 8:
-        batch_size = 2
-    elif len(dataset) < 32:
-        batch_size = 4
-    else:
-        batch_size = 8
-
-    num_workers = 0 if os.name == 'nt' else 4
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    # Create dataset and loader (larger batch for faster training)
+    dataset = ImageDataset("data", img_size=(224, 224))
+    batch_size = 64 if len(dataset) >= 4 else 2
+    num_workers = min(16, os.cpu_count())
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
     # Create model
     model = ColorizationModel().to(device)
     param_count = sum(p.numel() for p in model.parameters())
+    print(f"Model has {param_count:,} parameters")
+    print(f"Batch size: {batch_size} (for faster training)\n")
 
-    print(f"Model: {param_count:,} params | Batch: {batch_size}")
-
-    # Get epochs from user
-    epochs_input = input("\nEpochs (default 15): ").strip()
-    epochs = int(epochs_input) if epochs_input and epochs_input.isdigit() else 15
-
-    # TODO: Add option to resume from checkpoint
-    # TODO: Add early stopping
-
-    print(f"\nStarting training for {epochs} epochs...")
-    input("Press Enter to begin...")
-
-    # Train with validation
-    train_model(model, train_loader, val_loader, epochs, device,
-                "models", max(1, epochs//10))
-
-    print(f"\nModels saved in 'models/' folder")
-    print("  - colorization_best.pth")
-    print("  - colorization_final.pth")
-    print("\nRun gui.py to test the model")
-    input("\nPress Enter to exit...")
+    # Train (100 epochs for real results)
+    # This will take longer (maybe 20-30 mins on CPU) but is necessary for quality
+    train_model(model, loader, epochs=15, device=device, save_folder="models", save_every=1  )
+    print("\nDone!")
 
 
 if __name__ == "__main__":
