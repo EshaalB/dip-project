@@ -1,5 +1,3 @@
-# Generate results report for presentation
-
 import torch
 import numpy as np
 import sys
@@ -9,7 +7,7 @@ import cv2
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.model import ColorizationModel
-from src.utils import load_image, rgb_to_lab, lab_to_rgb, color_balance_histogram_remap
+from src.utils import loadImage, rgbtoLab, labtoRGB, saveImg
 
 
 def generate_report(model_path, data_folder="data", output_dir="output", device="cpu", num_images=5):
@@ -43,8 +41,8 @@ def generate_report(model_path, data_folder="data", output_dir="output", device=
         print(f"\nProcessing: {os.path.basename(img_path)}")
 
         # Load original
-        rgb_original = load_image(img_path, target_size=(256, 256))
-        L, a_target, b_target = rgb_to_lab(rgb_original)
+        rgb_original = loadImage(img_path, target_size=(224, 224))
+        L, a_target, b_target = rgbtoLab(rgb_original)
 
         # Colorize
         L_norm = L / 100.0
@@ -56,12 +54,11 @@ def generate_report(model_path, data_folder="data", output_dir="output", device=
         color_np = color_pred[0].cpu().numpy().transpose(1, 2, 0)
         a_pred = color_np[:, :, 0] * 127.0
         b_pred = color_np[:, :, 1] * 127.0
-
-        # Apply our color balance (original contribution)
-        a_balanced, b_balanced = color_balance_histogram_remap(a_pred, b_pred)
+        a_balanced = np.clip(a_pred, -127, 127)
+        b_balanced = np.clip(b_pred, -127, 127)
 
         # Final result
-        rgb_result = lab_to_rgb(L, a_balanced, b_balanced)
+        rgb_result = labtoRGB(L, a_balanced, b_balanced)
 
         # Compute metrics
         original_lab = cv2.cvtColor(rgb_original.astype(np.float32), cv2.COLOR_RGB2LAB)
@@ -75,9 +72,8 @@ def generate_report(model_path, data_folder="data", output_dir="output", device=
 
         # Save images
         base_name = os.path.splitext(os.path.basename(img_path))[0]
-        from src.utils import save_image
-        save_image(rgb_original, os.path.join(output_dir, "report", f"{base_name}_original.jpg"))
-        save_image(rgb_result, os.path.join(output_dir, "report", f"{base_name}_result.jpg"))
+        saveImg(rgb_original, os.path.join(output_dir, "report", f"{base_name}_original.jpg"))
+        saveImg(rgb_result, os.path.join(output_dir, "report", f"{base_name}_result.jpg"))
 
         # Save grayscale
         gray = (L / 100.0 * 255.0).clip(0, 255).astype(np.uint8)

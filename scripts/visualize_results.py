@@ -10,7 +10,7 @@ import os
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.model import ColorizationModel
-from src.utils import load_image, rgb_to_lab, lab_to_rgb, save_image
+from src.utils import loadImage, rgbtoLab, labtoRGB, saveImg
 
 
 def load_model(model_path, device="cpu"):
@@ -30,8 +30,8 @@ def load_model(model_path, device="cpu"):
 def visualize_contributions(img_path, model_path, output_dir="output", device="cpu"):
     # Show our original contributions visually
     print(f"Loading image: {img_path}")
-    img = load_image(img_path, target_size=(256, 256))
-    L, _, _ = rgb_to_lab(img)
+    img = loadImage(img_path, target_size=(224, 224))
+    L, _, _ = rgbtoLab(img)
 
     # Load model
     print(f"Loading model: {model_path}")
@@ -52,20 +52,18 @@ def visualize_contributions(img_path, model_path, output_dir="output", device="c
     # Denormalize
     a_pred = color_np[:, :, 0] * 127.0
     b_pred = color_np[:, :, 1] * 127.0
-
-    # Apply our original: color balance
-    from src.utils import color_balance_histogram_remap
-    a_balanced, b_balanced = color_balance_histogram_remap(a_pred, b_pred)
+    a_balanced = np.clip(a_pred, -127, 127)
+    b_balanced = np.clip(b_pred, -127, 127)
 
     # Final result
-    rgb_result = lab_to_rgb(L, a_balanced, b_balanced)
+    rgb_result = labtoRGB(L, a_balanced, b_balanced)
 
     # Save results
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(img_path))[0]
 
     # Save main result
-    save_image(rgb_result, os.path.join(output_dir, f"{base_name}_colorized.jpg"))
+    saveImg(rgb_result, os.path.join(output_dir, f"{base_name}_colorized.jpg"))
     print(f"✓ Saved colorized image")
 
     # Visualize correction map (our original contribution 1)
@@ -82,15 +80,15 @@ def visualize_contributions(img_path, model_path, output_dir="output", device="c
                 cv2.cvtColor(attention_vis, cv2.COLOR_RGB2BGR))
     print(f"✓ Saved attention map")
 
-    # Compare: with and without color balance (our original contribution 2)
-    rgb_no_balance = lab_to_rgb(L, a_pred, b_pred)
-    save_image(rgb_no_balance, os.path.join(output_dir, f"{base_name}_no_balance.jpg"))
-    print(f"✓ Saved comparison (without color balance)")
+    # Compare: with and without enhancement
+    rgb_no_balance = labtoRGB(L, a_pred, b_pred)
+    saveImg(rgb_no_balance, os.path.join(output_dir, f"{base_name}_no_balance.jpg"))
+    print(f"✓ Saved comparison (without enhancement)")
 
     print(f"\nAll results saved to {output_dir}/")
     print("This demonstrates our original contributions:")
     print("1. Correction Map - fixes local color mistakes")
-    print("2. Color Balance - fixes global color tint")
+    print("2. Attention Mechanism - guides where to apply corrections")
 
 
 def main():
