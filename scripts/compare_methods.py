@@ -8,7 +8,7 @@ import os
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.model import ColorizationModel
-from src.utils import load_image, rgb_to_lab, lab_to_rgb, save_image
+from src.utils import loadImage, rgbtoLab, labtoRGB, saveImg
 
 
 def baseline_colorize(L, model, device):
@@ -25,7 +25,7 @@ def baseline_colorize(L, model, device):
     a = np.clip(a, -127, 127)
     b = np.clip(b, -127, 127)
 
-    return lab_to_rgb(L, a, b)
+    return labtoRGB(L, a, b)
 
 
 def our_method_colorize(L, model, device):
@@ -36,24 +36,22 @@ def our_method_colorize(L, model, device):
     with torch.no_grad():
         color_pred, correction_map, attention = model(L_tensor)
 
-    # Model already applies corrections via fusion
+    # Model already applies corrections
     color_np = color_pred[0].cpu().numpy().transpose(1, 2, 0)
     a = color_np[:, :, 0] * 127.0
     b = color_np[:, :, 1] * 127.0
+    a = np.clip(a, -127, 127)
+    b = np.clip(b, -127, 127)
 
-    # Apply color balance (our original)
-    from src.utils import color_balance_histogram_remap
-    a, b = color_balance_histogram_remap(a, b)
-
-    return lab_to_rgb(L, a, b)
+    return labtoRGB(L, a, b)
 
 
 def compare(img_path, model_path, output_dir="output", device="cpu"):
     # Compare baseline vs our method
     print("Comparing methods...")
 
-    img = load_image(img_path, target_size=(256, 256))
-    L, _, _ = rgb_to_lab(img)
+    img = loadImage(img_path, target_size=(224, 224))
+    L, _, _ = rgbtoLab(img)
 
     model = ColorizationModel()
     checkpoint = torch.load(model_path, map_location=device)
@@ -74,8 +72,8 @@ def compare(img_path, model_path, output_dir="output", device="cpu"):
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(img_path))[0]
 
-    save_image(baseline_result, os.path.join(output_dir, f"{base_name}_baseline.jpg"))
-    save_image(our_result, os.path.join(output_dir, f"{base_name}_our_method.jpg"))
+    saveImg(baseline_result, os.path.join(output_dir, f"{base_name}_baseline.jpg"))
+    saveImg(our_result, os.path.join(output_dir, f"{base_name}_our_method.jpg"))
 
     print(f"\n✓ Comparison saved to {output_dir}/")
     print(f"  - Baseline (no corrections): {base_name}_baseline.jpg")

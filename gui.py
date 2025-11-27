@@ -1,33 +1,18 @@
-# PyQt5 GUI for pseudo-colorization
-
+import numpy as np
+import torch
 import sys
 import os
+from src.utils import loadImage, rgbtoLab, saveImg, labtoRGB
+from inference import load_model, colorize_image
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QPushButton, QLabel, QSlider, QCheckBox,
+                             QProgressBar, QFileDialog, QMessageBox)
+from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtGui import QImage, QPixmap
 
-# Fix path - we're at root now
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-
-import numpy as np
-import torch
-
-# Check PyQt5
-try:
-    from PyQt5.QtWidgets import (
-        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QPushButton, QLabel, QSlider, QCheckBox, QFileDialog, QMessageBox, QProgressBar
-    )
-    from PyQt5.QtCore import Qt, QThread, pyqtSignal
-    from PyQt5.QtGui import QImage, QPixmap
-except ImportError as e:
-    print("ERROR: PyQt5 not installed!")
-    print("Install with: pip install PyQt5")
-    sys.exit(1)
-
-from src.utils import load_image, rgb_to_lab, save_image
-# Import from root-level inference.py
-from inference import load_model, colorize_image
-
 
 class InferenceThread(QThread):
     finished = pyqtSignal(np.ndarray)
@@ -113,10 +98,10 @@ class ColorizationGUI(QMainWindow):
         # Input image
         input_group = QVBoxLayout()
         input_label = QLabel("Input (Grayscale)")
-        input_label.setAlignment(Qt.AlignCenter)
+        input_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label_input = QLabel()
         self.label_input.setMinimumSize(512, 256)
-        self.label_input.setAlignment(Qt.AlignCenter)
+        self.label_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label_input.setStyleSheet("border: 1px solid gray; background-color: #f0f0f0;")
         self.label_input.setText("No image loaded")
         input_group.addWidget(input_label)
@@ -126,10 +111,10 @@ class ColorizationGUI(QMainWindow):
         # Output image
         output_group = QVBoxLayout()
         output_label = QLabel("Output (Colorized)")
-        output_label.setAlignment(Qt.AlignCenter)
+        output_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label_output = QLabel()
         self.label_output.setMinimumSize(512, 256)
-        self.label_output.setAlignment(Qt.AlignCenter)
+        self.label_output.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label_output.setStyleSheet("border: 1px solid gray; background-color: #f0f0f0;")
         self.label_output.setText("No output yet")
         output_group.addWidget(output_label)
@@ -138,13 +123,11 @@ class ColorizationGUI(QMainWindow):
 
         main_layout.addLayout(image_layout)
 
-        # Controls
         controls_layout = QVBoxLayout()
 
-        # Bias slider
         bias_layout = QHBoxLayout()
         bias_label = QLabel("Bias Map Strength:")
-        self.slider_bias = QSlider(Qt.Horizontal)
+        self.slider_bias = QSlider(Qt.Orientation.Horizontal)
         self.slider_bias.setMinimum(0)
         self.slider_bias.setMaximum(100)
         self.slider_bias.setValue(100)
@@ -198,9 +181,9 @@ class ColorizationGUI(QMainWindow):
             return
 
         try:
-            img = load_image(file_path, target_size=(224, 224))
+            img = loadImage(file_path, target_size=(224, 224))
             self.current_image = img
-            L, _, _ = rgb_to_lab(img)
+            L, _, _ = rgbtoLab(img)
             self.current_L = L
 
             self.display_image(L, self.label_input, grayscale=True)
@@ -283,7 +266,6 @@ class ColorizationGUI(QMainWindow):
         self.label_status.setText("Error during colorization.")
 
     def display_image(self, image, label, grayscale=False):
-        # Display numpy image in QLabel with proper error handling
         try:
             if grayscale:
                 if image.dtype != np.uint8:
@@ -291,7 +273,7 @@ class ColorizationGUI(QMainWindow):
                 else:
                     img_display = image
                 height, width = img_display.shape
-                q_image = QImage(img_display.data, width, height, width, QImage.Format_Grayscale8)
+                q_image = QImage(img_display.data, width, height, width, QImage.Format.Format_Grayscale8)
             else:
                 if image.dtype != np.uint8:
                     img_display = np.clip(image, 0, 255).astype(np.uint8)
@@ -299,10 +281,10 @@ class ColorizationGUI(QMainWindow):
                     img_display = image
                 height, width, channels = img_display.shape
                 bytes_per_line = channels * width
-                q_image = QImage(img_display.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(img_display.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
 
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_pixmap = pixmap.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             label.setPixmap(scaled_pixmap)
         except Exception as e:
             label.setText(f"Display error: {str(e)}")
@@ -322,7 +304,7 @@ class ColorizationGUI(QMainWindow):
 
         if file_path:
             try:
-                save_image(self.current_output, file_path)
+                saveImg(self.current_output, file_path)
                 self.label_status.setText(f"Image saved to {os.path.basename(file_path)}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save image:\n{str(e)}")
@@ -333,7 +315,7 @@ def main():
         app = QApplication(sys.argv)
         window = ColorizationGUI()
         window.show()
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
     except Exception as e:
         print(f"ERROR starting GUI: {e}")
         import traceback

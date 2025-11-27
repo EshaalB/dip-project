@@ -9,7 +9,7 @@ import cv2
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.model import ColorizationModel
-from src.utils import load_image, rgb_to_lab, lab_to_rgb
+from src.utils import loadImage, rgbtoLab, labtoRGB
 
 
 def compute_metrics(pred_rgb, target_rgb):
@@ -64,8 +64,8 @@ def evaluate_model(model_path, data_folder="data", device="cpu", num_images=5):
 
     for img_path in image_files:
         # Load original
-        rgb_original = load_image(img_path, target_size=(256, 256))
-        L, a_target, b_target = rgb_to_lab(rgb_original)
+        rgb_original = loadImage(img_path, target_size=(224, 224))
+        L, a_target, b_target = rgbtoLab(rgb_original)
 
         # Colorize
         L_norm = L / 100.0
@@ -77,12 +77,10 @@ def evaluate_model(model_path, data_folder="data", device="cpu", num_images=5):
         color_np = color_pred[0].cpu().numpy().transpose(1, 2, 0)
         a_pred = color_np[:, :, 0] * 127.0
         b_pred = color_np[:, :, 1] * 127.0
+        a_pred = np.clip(a_pred, -127, 127)
+        b_pred = np.clip(b_pred, -127, 127)
 
-        # Apply our color balance
-        from src.utils import color_balance_histogram_remap
-        a_pred, b_pred = color_balance_histogram_remap(a_pred, b_pred)
-
-        rgb_pred = lab_to_rgb(L, a_pred, b_pred)
+        rgb_pred = labtoRGB(L, a_pred, b_pred)
 
         # Compute metrics
         metrics = compute_metrics(rgb_pred, rgb_original)

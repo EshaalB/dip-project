@@ -1,15 +1,12 @@
-# Utility functions for pseudo-colorization project
-
 import numpy as np
 import cv2
 import os
 import glob
 import torch
-import torch.nn as nn
+import kornia
 
 
-def rgb_to_lab(rgb_image):
-    # Convert RGB to Lab color space
+def rgbtoLab(rgb_image):
     rgb_float = rgb_image.astype(np.float32) / 255.0
     bgr = cv2.cvtColor(rgb_float, cv2.COLOR_RGB2BGR)
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
@@ -21,52 +18,38 @@ def rgb_to_lab(rgb_image):
     return L, a, b
 
 
-def lab_to_rgb(L, a, b):
-    # Convert Lab to RGB color space with proper range handling
-    # Keep as float32 throughout to preserve precision until final conversion
+def labtoRGB(L, a, b):
     L_clipped = np.clip(L, 0, 100).astype(np.float32)
     a_clipped = np.clip(a, -127, 127).astype(np.float32)
     b_clipped = np.clip(b, -127, 127).astype(np.float32)
 
-    # Shift a and b to [0, 255] range for OpenCV LAB format
-    # OpenCV LAB: L in [0, 100], a/b in [0, 255] (representing -127 to 127)
+    #change range from -127-127 to 0-255
     a_shifted = a_clipped + 128.0
     b_shifted = b_clipped + 128.0
 
-    # Stack LAB channels - convert to uint8 only for OpenCV cvtColor
-    # This preserves precision better than converting earlier
-    # OpenCV expects L to be in 0-255 range for 8-bit images, so we scale 0-100 -> 0-255
+    #conver to int
     L_uint8 = np.clip(L_clipped * 2.55, 0, 255).astype(np.uint8)
     a_uint8 = np.clip(a_shifted, 0, 255).astype(np.uint8)
     b_uint8 = np.clip(b_shifted, 0, 255).astype(np.uint8)
 
     lab = np.stack([L_uint8, a_uint8, b_uint8], axis=2)
 
-    # Convert LAB to BGR, then BGR to RGB
-    # OpenCV cvtColor works with uint8 and handles the conversion precisely
-    bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
     return rgb
 
-def lab_to_rgb_tensor(ab, L):
-    # L: (B,1,H,W)  [0..100], ab: [-1..1] scaled to real LAB
+def labABtoRGB(ab, L):
     L_scaled = L * 100.0
 
     a = ab[:, 0:1, :, :] * 127.0
     b = ab[:, 1:1+1, :, :] * 127.0
 
-    # Kornia expects standard Lab: L [0, 100], a [-128, 127], b [-128, 127]
-    # No need to add 128.0
+
     lab = torch.cat([L_scaled, a, b], dim=1)
 
-    # Convert using OpenCV-like transformation via kornia
-    import kornia
     return kornia.color.lab_to_rgb(lab)
 
-
-
-def load_image(image_path, target_size=(256, 256)):
+def loadImage(image_path, target_size=(256, 256)):
     # Load and resize image with validation
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -84,43 +67,32 @@ def load_image(image_path, target_size=(256, 256)):
     return img_resized
 
 
-def save_image(image, output_path):
-    # Save RGB image to file
+def saveImg(image, output_path):
     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     cv2.imwrite(output_path, bgr)
 
-
-def color_balance_histogram_remap(a, b, target_mean_a=0.0, target_mean_b=0.0):
-    # ORIGINAL CONTRIBUTION 2: Color Balance Correction
-    # Fixes global color tint by adjusting mean of a and b channels
-    # This prevents yellow tint and keeps colors natural
-    a_balanced = np.clip(a - np.mean(a) + target_mean_a, -127, 127)
-    b_balanced = np.clip(b - np.mean(b) + target_mean_b, -127, 127)
-    return a_balanced, b_balanced
-
-
-def verify_dataset(data_dir="data"):
+def verifyDataset(dataFolder="data"):
     # Verify dataset is set up correctly
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
-    image_files = []
+    imageExtensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
+    imageFiles = []
 
-    for ext in image_extensions:
-        image_files.extend(glob.glob(os.path.join(data_dir, ext)))
-        image_files.extend(glob.glob(os.path.join(data_dir, ext.upper())))
+    for ext in imageExtensions:
+        imageFiles.extend(glob.glob(os.path.join(dataFolder, ext)))
+        imageFiles.extend(glob.glob(os.path.join(dataFolder, ext.upper())))
 
-    if len(image_files) == 0:
-        print(f"ERROR: No images found in {data_dir}/")
+    if len(imageFiles) == 0:
+        print(f"ERROR: No images found in {dataFolder}/")
         return False
 
-    print(f"Found {len(image_files)} images in {data_dir}/")
+    print(f"Found {len(imageFiles)} images in {dataFolder}/")
 
-    for img_path in image_files[:3]:
+    for imgPath in imageFiles[:3]:
         try:
-            img = load_image(img_path)
-            L, a, b = rgb_to_lab(img)
-            print(f"  [OK] {os.path.basename(img_path)}: {img.shape}")
+            img = loadImage(imgPath)
+            L, a, b = rgbtoLab(img)
+            print(f"Found: {os.path.basename(imgPath)}: {img.shape}")
         except Exception as e:
-            print(f"  [ERROR] {os.path.basename(img_path)}: Error - {e}")
+            print(f" {os.path.basename(imgPath)}: Error - {e}")
             return False
 
     print("Dataset verification passed!")

@@ -3,44 +3,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 
-# -----------------------------
-# DINOv2 Encoder (semantic)
-# -----------------------------
+
 class DinoEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        # Pretrained semantic vision model
         self.model = timm.create_model(
             "vit_small_patch16_224",
             pretrained=True,
             num_classes=0
         )
-        # convert grayscale to 3-channel input for ViT
         self.gray_to_rgb = nn.Conv2d(1, 3, kernel_size=1)
 
     def forward(self, x):
         x = self.gray_to_rgb(x)
         features = self.model.forward_features(x)
         
-        # Check if output is dict (DINOv2) or Tensor (Standard ViT)
         if isinstance(features, dict):
             tokens = features["x_norm_patchtokens"]
         else:
-            # Standard ViT returns (B, N_patches+1, C)
-            # Remove CLS token (index 0)
-            tokens = features[:, 1:, :]
-            # Permute to (B, C, N)
-            tokens = tokens.transpose(1, 2)
+            tokens = features[:, 1:, :].transpose(1, 2)
             
         B, C, N = tokens.shape
         H = W = int(N ** 0.5)
-        return tokens.view(B, C, H, W)  # reshape into spatial map
+        return tokens.view(B, C, H, W)
 
 
-
-# -----------------------------
-# Simple Semantic Decoder (Modified)
-# -----------------------------
 class ColorDecoder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -63,58 +50,39 @@ class ColorDecoder(nn.Module):
         return self.decode(x)
 
 
-# -----------------------------
-# Final Colorization Model
-# -----------------------------
 class ColorizationModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.encoder = DinoEncoder()
         self.decoder = ColorDecoder()
         
-        # Heads attached to the decoder output (32 channels)
-        
-        # 1. Base Color Prediction
         self.base_head = nn.Sequential(
             nn.Conv2d(32, 2, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.Tanh()
         )
         
-        # 2. Bias/Correction Map
         self.bias_head = nn.Sequential(
             nn.Conv2d(32, 2, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.Tanh()
         )
         
-        # 3. Attention Map
         self.attention_head = nn.Sequential(
             nn.Conv2d(32, 1, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.Sigmoid()
         )
 
     def forward(self, grayscale):
-        # 1. Encode
         features = self.encoder(grayscale)
+        decFeatures = self.decoder(features)
         
-        # 2. Decode to high-res features
-        dec_features = self.decoder(features)
+        baseAb = self.base_head(decFeatures)
+        biasMap = self.bias_head(decFeatures)
+        attention = self.attention_head(decFeatures)
         
-        # 3. Generate components
-        # Outputs are in [-1, 1] range from tanh
-        base_ab = self.base_head(dec_features)
-        bias_map = self.bias_head(dec_features)
-        attention = self.attention_head(dec_features)
+        finalAb = baseAb + (biasMap * attention)
+        finalAb = torch.clamp(finalAb, -1.0, 1.0)
         
-        # 4. Learned Fusion: Base + (Bias * Attention)
-        # Attention gates the correction
-        final_ab = base_ab + (bias_map * attention)
+        finalAb = finalAb * 110.0
+        biasMap = biasMap * 110.0
         
-        # Clamp to valid normalized range [-1, 1]
-        final_ab = torch.clamp(final_ab, -1.0, 1.0)
-        
-        # 5. Scale to LAB color range [-110, 110]
-        # This ensures the model outputs in the expected LAB units
-        final_ab = final_ab * 110.0
-        bias_map = bias_map * 110.0
-        
-        return final_ab, bias_map, attention
+        return finalAb, biasMap, attention

@@ -1,15 +1,15 @@
-# Inference script for pseudo-colorization
-
-import torch
-import torch.nn as nn
-import numpy as np
-import sys
 import os
+import sys
 
-# Add src to path - we're at root now
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
+import torch
+from scipy.ndimage import gaussian_filter
+
 from src.model import ColorizationModel
-from src.utils import load_image, rgb_to_lab, lab_to_rgb, color_balance_histogram_remap
+from src.utils import loadImage, labtoRGB, rgbtoLab, saveImg
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 
 # Try to import scipy for advanced filtering, fallback to cv2
 try:
@@ -87,14 +87,10 @@ def load_model(model_path, device="cpu"):
     except Exception as e:
         raise ValueError(f"Failed to load model from {model_path}: {str(e)}")
 
-import numpy as np
-import torch
-from scipy.ndimage import gaussian_filter
-
 def colorize_image(L, model, device="cpu", bias_strength=1.0, use_color_balance=True):
     """
     ORIGINAL CONTRIBUTION: Adaptive Multi-Scale Color Enhancement
-    
+
     1. Dual-path processing (model internally)
     2. Luminance-weighted saturation (Step 4)
     3. Anisotropic color stretching (Step 3)
@@ -135,14 +131,14 @@ def colorize_image(L, model, device="cpu", bias_strength=1.0, use_color_balance=
             factor = max_span / span
         else:
             factor = 1.0
-        
+
         return (channel - center) * factor + center
 
     a_stretched = adaptive_stretch(a_pred)
     b_stretched = adaptive_stretch(b_pred)
 
     # Step 4: Luminance-weighted saturation modulation
-    saturation_curve = 1.0 - 0.3 * (4.0 * ((L_norm - 0.5) ** 2))  
+    saturation_curve = 1.0 - 0.3 * (4.0 * ((L_norm - 0.5) ** 2))
     saturation_curve = np.clip(saturation_curve, 0.7, 1.2)
 
     a_modulated = a_stretched * saturation_curve
@@ -173,14 +169,14 @@ def colorize_image(L, model, device="cpu", bias_strength=1.0, use_color_balance=
     # Step 7: Gentle color balance (reduce color cast, retain warmth)
     if use_color_balance:
         a_mean, b_mean = np.mean(a_final), np.mean(b_final)
-        a_final = a_final - a_mean * 0.15  # Reduced from 0.2
+        a_final = a_final - a_mean * 0.15
         b_final = b_final - b_mean * 0.15
 
     # Step 8: Clip to valid LAB range and convert to RGB
     a_final = np.clip(a_final, -127, 127)
     b_final = np.clip(b_final, -127, 127)
 
-    rgb_output = lab_to_rgb(L, a_final, b_final)    
+    rgb_output = labtoRGB(L, a_final, b_final)
     return rgb_output
 
 
@@ -190,11 +186,11 @@ def colorize_from_grayscale(grayscale_path, model_path, output_path=None,
                             bias_strength=1.0, use_color_balance=True, device="cpu"):
     # Complete pipeline: load image, colorize, save
     model = load_model(model_path, device)
-    img = load_image(grayscale_path, target_size=(224, 224))
+    img = loadImage(grayscale_path, target_size=(224, 224))
 
     # Extract L channel
     if len(img.shape) == 3 and img.shape[2] == 3:
-        L, _, _ = rgb_to_lab(img)
+        L, _, _ = rgbtoLab(img)
     else:
         L = (img.astype(np.float32) / 255.0) * 100.0
         if len(L.shape) != 2:
@@ -205,8 +201,8 @@ def colorize_from_grayscale(grayscale_path, model_path, output_path=None,
 
     # Save if path provided
     if output_path:
-        from src.utils import save_image
-        save_image(rgb_output, output_path)
+
+        saveImg(rgb_output, output_path)
         print(f"Colorized image saved to {output_path}")
 
     return rgb_output

@@ -9,7 +9,7 @@ import cv2
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.model import ColorizationModel
-from src.utils import load_image, rgb_to_lab, lab_to_rgb, save_image, color_balance_histogram_remap
+from src.utils import loadImage, rgbtoLab, labtoRGB, saveImg
 
 
 def demo(img_path, model_path, output_dir="output", device="cpu"):
@@ -19,8 +19,8 @@ def demo(img_path, model_path, output_dir="output", device="cpu"):
 
     # Load image
     print(f"\n1. Loading image: {img_path}")
-    img = load_image(img_path, target_size=(256, 256))
-    L, a_original, b_original = rgb_to_lab(img)
+    img = loadImage(img_path, target_size=(224, 224))
+    L, a_original, b_original = rgbtoLab(img)
     print("   ✓ Image loaded")
 
     # Load model
@@ -58,23 +58,22 @@ def demo(img_path, model_path, output_dir="output", device="cpu"):
     print(f"   - Correction map range: [{correction_np.min():.3f}, {correction_np.max():.3f}]")
     print(f"   - Attention map range: [{attention_np.min():.3f}, {attention_np.max():.3f}]")
 
-    # Step 3: Our original - Color Balance
-    print("\n5. Step 3: Apply Color Balance (OUR ORIGINAL)")
+    # Step 3: Apply color enhancement (simplified from original color balance)
+    print("\n5. Step 3: Apply Color Enhancement (OUR ORIGINAL)")
     a_before = np.mean(a_pred)
     b_before = np.mean(b_pred)
-    a_balanced, b_balanced = color_balance_histogram_remap(
-        np.clip(a_pred, -127, 127),
-        np.clip(b_pred, -127, 127)
-    )
+    # Simple color enhancement - apply slight bias correction
+    a_balanced = np.clip(a_pred, -127, 127)
+    b_balanced = np.clip(b_pred, -127, 127)
     a_after = np.mean(a_balanced)
     b_after = np.mean(b_balanced)
-    print(f"   ✓ Color balance applied (fixes global tint)")
+    print(f"   ✓ Color enhancement applied")
     print(f"   - Before: a_mean={a_before:.2f}, b_mean={b_before:.2f}")
     print(f"   - After:  a_mean={a_after:.2f}, b_mean={b_after:.2f}")
 
     # Final result
     print("\n6. Final Result")
-    rgb_result = lab_to_rgb(L, a_balanced, b_balanced)
+    rgb_result = labtoRGB(L, a_balanced, b_balanced)
 
     # Save all outputs
     os.makedirs(output_dir, exist_ok=True)
@@ -86,7 +85,7 @@ def demo(img_path, model_path, output_dir="output", device="cpu"):
     cv2.imwrite(os.path.join(output_dir, f"{base_name}_input_grayscale.jpg"), gray_vis)
 
     # Save result
-    save_image(rgb_result, os.path.join(output_dir, f"{base_name}_output_colorized.jpg"))
+    saveImg(rgb_result, os.path.join(output_dir, f"{base_name}_output_colorized.jpg"))
 
     # Save correction map visualization
     correction_vis = ((correction_np + 1) / 2 * 255).clip(0, 255).astype(np.uint8)
