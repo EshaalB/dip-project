@@ -105,7 +105,7 @@ def train_model(model, data_loader, epochs=100, device="cpu", save_folder="model
 
     model.train()
     print(f"\n{'='*60}")
-    print(f"  ENHANCED TRAINING WITH UPDATED LOSS")
+    print(f"  ENHANCED TRAINING WITH LOSS")
     print(f"{'='*60}")
     print(f"Epochs: {epochs} | Device: {device}")
     print(f"Components: Pixel + Perceptual + Attention Smooth + L-guided Smooth")
